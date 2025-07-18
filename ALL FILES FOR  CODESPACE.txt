@@ -1,0 +1,441 @@
+# ICE BUTTERFLY MONITOR BOT - ALL FILES FOR GITHUB CODESPACES
+# Copy and paste each file section into your GitHub Codespace
+
+# =================== FILE: main.py ===================
+#!/usr/bin/env python3
+"""
+Ice Butterfly Monitor Bot
+A Discord bot that monitors taming.io shop for the Ice Butterfly pet using image recognition.
+"""
+
+import asyncio
+import threading
+import signal
+import sys
+import os
+from datetime import datetime
+
+from config import Config
+from utils import setup_logging, create_reference_image_if_missing
+from discord_bot import IceButterflyBot
+from web_interface import run_web_interface, update_bot_status
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals"""
+    print(f"\nReceived signal {signum}. Shutting down gracefully...")
+    sys.exit(0)
+
+def validate_environment():
+    """Validate environment and configuration"""
+    logger = setup_logging(Config.LOG_LEVEL)
+    
+    # Validate configuration
+    config_errors = Config.validate()
+    if config_errors:
+        logger.error("Configuration validation failed:")
+        for error in config_errors:
+            logger.error(f"  - {error}")
+        return False
+    
+    # Create reference image if missing
+    create_reference_image_if_missing(logger)
+    
+    # Check for required files
+    required_files = [Config.REFERENCE_IMAGE_PATH]
+    for file_path in required_files:
+        if not os.path.exists(file_path):
+            logger.error(f"Required file not found: {file_path}")
+            return False
+    
+    logger.info("Environment validation successful")
+    return True
+
+def start_web_interface():
+    """Start the web interface in a separate thread"""
+    logger = setup_logging(Config.LOG_LEVEL)
+    
+    try:
+        logger.info(f"Starting web interface on {Config.WEB_HOST}:{Config.WEB_PORT}")
+        run_web_interface()
+    except Exception as e:
+        logger.error(f"Error starting web interface: {str(e)}")
+
+def main():
+    """Main entry point"""
+    # Setup signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Setup logging
+    logger = setup_logging(Config.LOG_LEVEL)
+    
+    logger.info("=" * 60)
+    logger.info("Ice Butterfly Monitor Bot Starting")
+    logger.info("=" * 60)
+    
+    # Validate environment
+    if not validate_environment():
+        logger.error("Environment validation failed. Exiting.")
+        return 1
+    
+    # Start web interface in background thread
+    web_thread = threading.Thread(target=start_web_interface, daemon=True)
+    web_thread.start()
+    
+    # Create and start Discord bot
+    try:
+        bot = IceButterflyBot()
+        
+        # Update web interface with bot status
+        update_bot_status({
+            "active": True,
+            "start_time": datetime.now(),
+            "checks_performed": 0,
+            "last_check": None,
+            "errors": [],
+            "ice_butterfly_found": False,
+            "last_screenshot": None
+        })
+        
+        logger.info("Starting Discord bot...")
+        bot.run(Config.DISCORD_BOT_TOKEN)
+        
+    except Exception as e:
+        logger.error(f"Error running Discord bot: {str(e)}")
+        return 1
+    
+    logger.info("Bot shutdown complete")
+    return 0
+
+if __name__ == "__main__":
+    exit_code = main()
+    sys.exit(exit_code)
+
+# =================== FILE: config.py ===================
+import os
+from typing import Optional
+
+class Config:
+    """Configuration settings for the Ice Butterfly Monitor Bot"""
+    
+    # Discord Configuration
+    DISCORD_BOT_TOKEN: str = os.getenv("DISCORD_BOT_TOKEN", "")
+    DISCORD_WEBHOOK_URL: str = os.getenv("DISCORD_WEBHOOK_URL", "")
+    DISCORD_CHANNEL_NAME: str = os.getenv("DISCORD_CHANNEL_NAME", "general")
+    
+    # Monitoring Configuration
+    MONITORING_INTERVAL: int = int(os.getenv("MONITORING_INTERVAL", "10"))  # seconds
+    STATUS_UPDATE_INTERVAL: int = int(os.getenv("STATUS_UPDATE_INTERVAL", "600"))  # 10 minutes
+    
+    # Browser Configuration
+    HEADLESS_MODE: bool = os.getenv("HEADLESS_MODE", "true").lower() == "true"
+    BROWSER_TIMEOUT: int = int(os.getenv("BROWSER_TIMEOUT", "30"))
+    
+    # Image Recognition Configuration
+    MATCH_THRESHOLD: float = float(os.getenv("MATCH_THRESHOLD", "0.8"))
+    REFERENCE_IMAGE_PATH: str = os.getenv("REFERENCE_IMAGE_PATH", "ice_butterfly_reference.png")
+    
+    # Game Configuration
+    GAME_URL: str = os.getenv("GAME_URL", "https://taming.io")
+    
+    # Web Interface Configuration
+    WEB_PORT: int = int(os.getenv("WEB_PORT", "5000"))
+    WEB_HOST: str = os.getenv("WEB_HOST", "0.0.0.0")
+    
+    # Logging Configuration
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    
+    @classmethod
+    def validate(cls) -> list[str]:
+        """Validate configuration and return list of errors"""
+        errors = []
+        
+        if not cls.DISCORD_BOT_TOKEN:
+            errors.append("DISCORD_BOT_TOKEN is required")
+        
+        if cls.MONITORING_INTERVAL < 1:
+            errors.append("MONITORING_INTERVAL must be at least 1 second")
+        
+        if cls.MATCH_THRESHOLD < 0 or cls.MATCH_THRESHOLD > 1:
+            errors.append("MATCH_THRESHOLD must be between 0 and 1")
+        
+        return errors
+    
+    @classmethod
+    def get_chrome_options(cls):
+        """Get Chrome options for selenium"""
+        from selenium.webdriver.chrome.options import Options
+        
+        chrome_options = Options()
+        
+        if cls.HEADLESS_MODE:
+            chrome_options.add_argument('--headless')
+        
+        # Standard Chrome options for containerized environments
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_argument('--disable-plugins')
+        chrome_options.add_argument('--disable-images')
+        chrome_options.add_argument('--disable-javascript')
+        chrome_options.add_argument('--disable-web-security')
+        chrome_options.add_argument('--allow-running-insecure-content')
+        chrome_options.add_argument('--disable-features=VizDisplayCompositor')
+        chrome_options.add_argument('--window-size=1920,1080')
+        
+        # User agent to avoid detection
+        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+        
+        return chrome_options
+
+# =================== FILE: utils.py ===================
+import os
+import logging
+from datetime import datetime
+from typing import Optional
+
+def setup_logging(log_level: str = "INFO") -> logging.Logger:
+    """Setup logging configuration"""
+    # Create logs directory if it doesn't exist
+    os.makedirs("logs", exist_ok=True)
+    
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper()),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler("logs/ice_butterfly_monitor.log"),
+            logging.StreamHandler()
+        ]
+    )
+    
+    logger = logging.getLogger("ice_butterfly_monitor")
+    return logger
+
+def ensure_directory_exists(path: str) -> None:
+    """Ensure directory exists for given path"""
+    directory = os.path.dirname(path)
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory, exist_ok=True)
+
+def generate_screenshot_filename() -> str:
+    """Generate unique screenshot filename"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"screenshots/shop_screenshot_{timestamp}.png"
+
+def format_duration(seconds: int) -> str:
+    """Format duration in human readable format"""
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    else:
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        return f"{hours}h {minutes}m"
+
+def get_timestamp() -> str:
+    """Get current timestamp"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def create_reference_image_if_missing(logger):
+    """Create reference image if missing"""
+    reference_path = "ice_butterfly_reference.png"
+    if not os.path.exists(reference_path):
+        logger.warning(f"Reference image not found: {reference_path}")
+        logger.info("Please add the Ice Butterfly reference image to the project root")
+
+# =================== FILE: requirements-codespace.txt ===================
+discord.py==2.3.2
+selenium==4.15.2
+undetected-chromedriver==3.5.4
+opencv-python==4.8.1.78
+Pillow==10.0.1
+flask==3.0.0
+numpy==1.24.3
+requests==2.31.0
+python-dotenv==1.0.0
+
+# =================== FILE: setup_env.sh ===================
+#!/bin/bash
+
+# Ice Butterfly Monitor Bot - Environment Setup Script
+# This script helps you set up the environment variables needed for the bot
+
+echo "🦋 Ice Butterfly Monitor Bot - Environment Setup"
+echo "================================================"
+echo
+
+# Check if .env file exists
+if [ -f ".env" ]; then
+    echo "Found existing .env file."
+    read -p "Do you want to update it? (y/n): " update_env
+    if [ "$update_env" != "y" ]; then
+        echo "Keeping existing .env file."
+        exit 0
+    fi
+fi
+
+# Create or update .env file
+echo "Creating environment configuration..."
+echo
+
+# Discord Bot Token
+echo "🤖 Discord Bot Token Setup"
+echo "1. Go to https://discord.com/developers/applications"
+echo "2. Create a new application or select existing one"
+echo "3. Go to 'Bot' section"
+echo "4. Copy the bot token"
+echo
+read -p "Enter your Discord Bot Token: " DISCORD_BOT_TOKEN
+echo
+
+# Optional configurations
+echo "📋 Optional Configuration (press Enter for defaults)"
+echo
+
+read -p "Discord Channel Name (default: general): " DISCORD_CHANNEL_NAME
+DISCORD_CHANNEL_NAME=${DISCORD_CHANNEL_NAME:-general}
+
+read -p "Monitoring Interval in seconds (default: 10): " MONITORING_INTERVAL
+MONITORING_INTERVAL=${MONITORING_INTERVAL:-10}
+
+read -p "Status Update Interval in seconds (default: 600): " STATUS_UPDATE_INTERVAL
+STATUS_UPDATE_INTERVAL=${STATUS_UPDATE_INTERVAL:-600}
+
+read -p "Match Threshold (0.0-1.0, default: 0.8): " MATCH_THRESHOLD
+MATCH_THRESHOLD=${MATCH_THRESHOLD:-0.8}
+
+read -p "Web Server Port (default: 5000): " WEB_PORT
+WEB_PORT=${WEB_PORT:-5000}
+
+# Create .env file
+cat > .env << EOL
+# Discord Bot Configuration
+DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+DISCORD_CHANNEL_NAME=${DISCORD_CHANNEL_NAME}
+
+# Monitoring Configuration
+MONITORING_INTERVAL=${MONITORING_INTERVAL}
+STATUS_UPDATE_INTERVAL=${STATUS_UPDATE_INTERVAL}
+MATCH_THRESHOLD=${MATCH_THRESHOLD}
+
+# Web Interface Configuration
+WEB_PORT=${WEB_PORT}
+WEB_HOST=0.0.0.0
+
+# Logging Configuration
+LOG_LEVEL=INFO
+LOG_FILE=logs/ice_butterfly_monitor.log
+
+# Browser Configuration
+HEADLESS=true
+BROWSER_TIMEOUT=30
+EOL
+
+echo "✅ Environment configuration saved to .env"
+echo
+echo "Next steps:"
+echo "1. Make sure your Discord bot has the following permissions:"
+echo "   - Send Messages"
+echo "   - Embed Links"
+echo "   - Attach Files"
+echo "   - Read Message History"
+echo "2. Invite the bot to your Discord server"
+echo "3. Run './run.sh' to start the bot"
+echo
+echo "🚀 Setup complete! Your bot is ready to monitor for Ice Butterfly!"
+
+# =================== FILE: run.sh ===================
+#!/bin/bash
+
+# Ice Butterfly Monitor Bot - Run Script
+# This script starts the bot with proper environment setup
+
+echo "🦋 Starting Ice Butterfly Monitor Bot..."
+echo "======================================"
+
+# Check if .env file exists
+if [ ! -f ".env" ]; then
+    echo "❌ No .env file found!"
+    echo "Please run './setup_env.sh' first to configure the environment."
+    exit 1
+fi
+
+# Load environment variables
+source .env
+
+# Create necessary directories
+mkdir -p screenshots
+mkdir -p logs
+
+# Check if Discord bot token is set
+if [ -z "$DISCORD_BOT_TOKEN" ]; then
+    echo "❌ DISCORD_BOT_TOKEN is not set!"
+    echo "Please run './setup_env.sh' to configure your bot token."
+    exit 1
+fi
+
+# Check if Chrome is installed
+if ! command -v google-chrome &> /dev/null; then
+    echo "❌ Google Chrome not found!"
+    echo "Installing Chrome..."
+    
+    # Add Chrome repository
+    wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+    echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+    
+    # Update and install Chrome
+    sudo apt-get update
+    sudo apt-get install -y google-chrome-stable
+    
+    echo "✅ Chrome installed successfully!"
+fi
+
+# Check if ChromeDriver is installed
+if ! command -v chromedriver &> /dev/null; then
+    echo "❌ ChromeDriver not found!"
+    echo "Installing ChromeDriver..."
+    
+    # Get Chrome version
+    CHROME_VERSION=$(google-chrome --version | cut -d " " -f3 | cut -d "." -f1)
+    CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}")
+    
+    # Download and install ChromeDriver
+    wget -O /tmp/chromedriver.zip "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip"
+    sudo unzip /tmp/chromedriver.zip -d /usr/local/bin/
+    sudo chmod +x /usr/local/bin/chromedriver
+    rm /tmp/chromedriver.zip
+    
+    echo "✅ ChromeDriver installed successfully!"
+fi
+
+# Install Python dependencies if needed
+if [ ! -d "venv" ]; then
+    echo "🐍 Creating virtual environment..."
+    python3 -m venv venv
+fi
+
+echo "📦 Installing dependencies..."
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements-codespace.txt
+
+echo "🚀 Starting bot..."
+echo "Web dashboard will be available at: http://localhost:${WEB_PORT:-5000}"
+echo "Press Ctrl+C to stop the bot"
+echo
+
+# Start the bot
+python main.py
+
+# =================== CREATE THESE DIRECTORIES ===================
+# Create these empty directories in your project:
+# - screenshots/
+# - logs/
+# - static/
+# - templates/
+# - .devcontainer/
+# - .github/workflows/
+
